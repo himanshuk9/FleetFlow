@@ -1,6 +1,7 @@
 from sqlalchemy import Column , Integer , String , Boolean ,Float , DateTime ,ForeignKey
 from myapp.database import Base
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 class Vehicle(Base):
     __tablename__ ="vehicle"
 
@@ -58,3 +59,25 @@ class Ride(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     driver = relationship("User", foreign_keys=[driver_id])
     vehicle = relationship("Vehicle", foreign_keys=[vehicle_id])
+
+class Bookings(Base):
+    __tablename__ = "bookings"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer, ForeignKey("users.id"), nullable=False
+    )
+    ride_id = Column(
+        Integer, ForeignKey("rides.id"), nullable=False
+    )
+
+    seats_booked = Column(Integer, nullable=False)
+    total_price = Column(Float, nullable=False)
+
+    status = Column(
+        String(30), default="Pending", nullable=False
+    )
+    created_at = Column(
+        DateTime, server_default=func.now(), nullable=False
+    )

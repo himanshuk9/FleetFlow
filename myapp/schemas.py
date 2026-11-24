@@ -91,3 +91,17 @@ class RideResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class BookingCreate(BaseModel):
+    ride_id: int
+    seats_booked: int = Field(gt=0)
+
+class BookingResponse(BaseModel):
+    id: int
+    user_id: int
+    ride_id: int
+    seats_booked: int
+    total_price: float
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

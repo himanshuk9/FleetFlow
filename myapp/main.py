@@ -1,7 +1,7 @@
 
 import os
 from datetime import datetime, timedelta, timezone
-
+from sqlalchemy import update
 import jwt
 from jwt.exceptions import InvalidTokenError
 from dotenv import load_dotenv
@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from pwdlib import PasswordHash
 
 from myapp.database import Base, engine, get_db
-from myapp.models import Vehicle, Drivers, User , Ride
+from myapp.models import Vehicle, Drivers, User , Ride , Bookings   
 from myapp.schemas import (
     VehicleCreate,
     VehicleResponse,
@@ -24,7 +24,9 @@ from myapp.schemas import (
     UserLogin,
     UserUpdate,
     RideCreate,
-    RideResponse
+    RideResponse ,
+    BookingCreate,
+    BookingResponse
 )
 
 # ==================== JWT CONFIGURATION ====================
@@ -478,7 +480,14 @@ def create_ride(
 
     return new_ride
 
+@app.get("/drivers")
+def get_drivers(db: Session = Depends(get_db)):
+    drivers = db.query(User).filter(
+        User.role == "driver",
+        User.is_active == True
+    ).all()
 
+    return drivers
     
 @app.get("/rides", response_model=list[RideResponse])
 def get_rides(db: Session = Depends(get_db)):
@@ -533,3 +542,89 @@ def update_ride_availability(
         "ride_id": ride.id,
         "is_active": ride.is_active
     }
+
+@app.post(
+    "/bookings",
+    response_model=BookingResponse,
+    status_code=201
+)
+def create_booking(
+    booking: BookingCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # 1. Only normal users can book rides
+    if current_user.role != "user":
+        raise HTTPException(
+            status_code=403,
+            detail="Only normal users can book rides"
+        )
+
+    # 2. Find the selected ride
+    ride = db.query(Ride).filter(
+        Ride.id == booking.ride_id,
+        Ride.is_active == True
+    ).first()
+
+    if ride is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Ride not found or inactive"
+        )
+
+    # 3. Check that the ride has not departed
+    if ride.departure_time < datetime.now():
+        raise HTTPException(
+            status_code=400,
+            detail="This ride has already departed"
+        )
+
+    # 4. Calculate the price on the backend
+    total_price = ride.price * booking.seats_booked
+
+    try:
+        # 5. Check and reserve seats in one database statement
+        result = db.execute(
+            update(Ride)
+            .where(
+                Ride.id == booking.ride_id,
+                Ride.is_active == True,
+                Ride.available_seats >= booking.seats_booked
+            )
+            .values(
+                available_seats=(
+                    Ride.available_seats - booking.seats_booked
+                )
+            )
+        )
+
+        if result.rowcount != 1:
+            db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail="Not enough seats available"
+            )
+
+        # 6. Create the booking for the logged-in user
+        new_booking = Bookings(
+            user_id=current_user.id,
+            ride_id=ride.id,
+            seats_booked=booking.seats_booked,
+            total_price=total_price,
+            status="Pending"
+        )
+
+        db.add(new_booking)
+        db.commit()
+        db.refresh(new_booking)
+
+        return new_booking
+
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Booking could not be created"
+        )
