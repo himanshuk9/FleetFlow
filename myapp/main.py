@@ -1,10 +1,12 @@
 
 import os
 from datetime import datetime, timedelta, timezone
+import resend
 from sqlalchemy import update
 import jwt
 from jwt.exceptions import InvalidTokenError
 from dotenv import load_dotenv
+
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -37,6 +39,7 @@ load_dotenv()
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
+resend.api_key = os.getenv("RESEND_API_KEY")
 if not SECRET_KEY:
     raise RuntimeError("JWT_SECRET_KEY is missing from .env")
 
@@ -714,67 +717,130 @@ def get_my_bookings(
     return result
 
 
+def send_booking_status_email(user, booking, ride):
+    api_key = os.getenv("RESEND_API_KEY")
+    sender = os.getenv("EMAIL_FROM")
+
+    if not api_key or not sender:
+        print("Email notification skipped: Resend configuration missing.")
+        return False
+
+    if not user.email:
+        print("Email notification skipped: User email is missing.")
+        return False
+
+    status = booking.status
+
+    if status == "Confirmed":
+        subject = "Your FleetFlow booking is confirmed!"
+        message = "Good news! Your booking has been confirmed."
+    elif status == "Cancelled":
+        subject = "Your FleetFlow booking has been cancelled"
+        message = "Your booking has been cancelled by the administrator."
+    else:
+        return False
+
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px;">
+        <h2>FleetFlow Booking Update</h2>
+
+        <p>Hello {user.name},</p>
+
+        <p>{message}</p>
+
+        <h3>Booking Details</h3>
+
+        <p><strong>Booking ID:</strong> #{booking.id}</p>
+        <p><strong>Route:</strong> {ride.source} to {ride.destination}</p>
+        <p><strong>Departure:</strong> {ride.departure_time}</p>
+        <p><strong>Seats:</strong> {booking.seats_booked}</p>
+        <p><strong>Total Amount:</strong> ₹{booking.total_price}</p>
+        <p><strong>Status:</strong> {status}</p>
+
+        <p>Thank you for choosing FleetFlow!</p>
+    </div>
+    """
+
+    try:
+        resend.api_key = api_key
+
+        result = resend.Emails.send({
+            "from": sender,
+            "to": [user.email],
+            "subject": subject,
+            "html": html,
+        })
+
+        print(f"Booking email submitted to Resend for booking #{booking.id}")
+        return True
+
+    except Exception as exc:
+        # Do not expose API keys or sensitive details in logs.
+        print(f"Booking email failed for booking #{booking.id}: {type(exc).__name__}")
+        return False
+
 
 @app.patch("/admin/bookings/{booking_id}/status")
 def update_booking_status(
     booking_id: int,
     new_status: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    # Only admin can change booking status
     if current_user.role != "admin":
         raise HTTPException(
             status_code=403,
-            detail="Only admin can update booking status"
+            detail="Only admin can update booking status",
         )
 
-    # Validate status
     new_status = new_status.strip().capitalize()
 
     if new_status not in ["Confirmed", "Cancelled"]:
         raise HTTPException(
             status_code=400,
-            detail="Status must be Confirmed or Cancelled"
+            detail="Status must be Confirmed or Cancelled",
         )
 
-    # Find booking
-    booking = db.query(Bookings).filter(
-        Bookings.id == booking_id
-    ).first()
+    booking = (
+        db.query(Bookings)
+        .filter(Bookings.id == booking_id)
+        .with_for_update()
+        .first()
+    )
 
     if not booking:
-        raise HTTPException(
-            status_code=404,
-            detail="Booking not found"
-        )
+        raise HTTPException(status_code=404, detail="Booking not found")
 
-    # Prevent duplicate status changes
     if booking.status == new_status:
         return {
             "message": f"Booking is already {new_status}",
             "booking_id": booking.id,
-            "status": booking.status
+            "status": booking.status,
+            "email_sent": False,
         }
 
-    if booking.status == "Cancelled":
+    if booking.status != "Pending":
         raise HTTPException(
             status_code=400,
-            detail="Cancelled booking cannot be changed"
+            detail="Only pending bookings can change status",
         )
 
-    # Restore seats when cancelling a pending booking
+    user = db.query(User).filter(User.id == booking.user_id).first()
+
+    ride = (
+        db.query(Ride)
+        .filter(Ride.id == booking.ride_id)
+        .with_for_update()
+        .first()
+    )
+
+    if not ride:
+        raise HTTPException(
+            status_code=404,
+            detail="Associated ride not found",
+        )
+
     if new_status == "Cancelled":
-        ride = db.query(Ride).filter(
-            Ride.id == booking.ride_id
-        ).with_for_update().first()
-
-        if not ride:
-            raise HTTPException(
-                status_code=404,
-                detail="Associated ride not found"
-            )
-
         ride.available_seats += booking.seats_booked
 
     booking.status = new_status
@@ -786,11 +852,19 @@ def update_booking_status(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail="Failed to update booking status"
+            detail="Failed to update booking status",
         )
+
+    # Send email AFTER the database commit.
+    # Email failure must not undo the booking status.
+    email_sent = False
+
+    if user:
+        email_sent = send_booking_status_email(user, booking, ride)
 
     return {
         "message": f"Booking {new_status.lower()} successfully",
         "booking_id": booking.id,
-        "status": booking.status
+        "status": booking.status,
+        "email_sent": email_sent,
     }
