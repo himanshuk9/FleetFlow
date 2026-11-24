@@ -105,3 +105,41 @@ class BookingResponse(BaseModel):
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+
+
+class AdminBookingResponse(BaseModel):
+    booking_id: int
+
+    user_id: int
+    user_name: str
+    user_email: str
+
+    ride_id: int
+    ride_title: str
+    source: str
+    destination: str
+    departure_time: datetime
+
+    seats_booked: int
+    total_price: float
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MyBookingResponse(BaseModel):
+    booking_id: int
+    ride_id: int
+    ride_title: str
+    source: str
+    destination: str
+    departure_time: datetime
+    seats_booked: int
+    total_price: float
+    status: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

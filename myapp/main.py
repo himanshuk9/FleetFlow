@@ -26,7 +26,9 @@ from myapp.schemas import (
     RideCreate,
     RideResponse ,
     BookingCreate,
-    BookingResponse
+    BookingResponse ,
+    AdminBookingResponse,
+    MyBookingResponse
 )
 
 # ==================== JWT CONFIGURATION ====================
@@ -628,3 +630,167 @@ def create_booking(
             status_code=500,
             detail="Booking could not be created"
         )
+
+
+
+@app.get(
+    "/admin/bookings",
+    response_model=list[AdminBookingResponse]
+)
+def get_all_bookings(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Only admin can access all bookings
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only admin can view all bookings"
+        )
+
+    bookings = (
+        db.query(Bookings, User, Ride)
+        .join(User, Bookings.user_id == User.id)
+        .join(Ride, Bookings.ride_id == Ride.id)
+        .order_by(Bookings.created_at.desc())
+        .all()
+    )
+
+    result = []
+
+    for booking, user, ride in bookings:
+        result.append({
+            "booking_id": booking.id,
+
+            "user_id": user.id,
+            "user_name": user.name,
+            "user_email": user.email,
+
+            "ride_id": ride.id,
+            "ride_title": ride.title,
+            "source": ride.source,
+            "destination": ride.destination,
+            "departure_time": ride.departure_time,
+
+            "seats_booked": booking.seats_booked,
+            "total_price": booking.total_price,
+            "status": booking.status,
+            "created_at": booking.created_at
+        })
+
+    return result
+
+
+
+@app.get("/my-bookings", response_model=list[MyBookingResponse])
+def get_my_bookings(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    bookings = (
+        db.query(Bookings, Ride)
+        .join(Ride, Bookings.ride_id == Ride.id)
+        .filter(Bookings.user_id == current_user.id)
+        .order_by(Bookings.created_at.desc())
+        .all()
+    )
+
+    result = []
+
+    for booking, ride in bookings:
+        result.append({
+            "booking_id": booking.id,
+            "ride_id": ride.id,
+            "ride_title": ride.title,
+            "source": ride.source,
+            "destination": ride.destination,
+            "departure_time": ride.departure_time,
+            "seats_booked": booking.seats_booked,
+            "total_price": booking.total_price,
+            "status": booking.status,
+            "created_at": booking.created_at
+        })
+
+    return result
+
+
+
+@app.patch("/admin/bookings/{booking_id}/status")
+def update_booking_status(
+    booking_id: int,
+    new_status: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    # Only admin can change booking status
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only admin can update booking status"
+        )
+
+    # Validate status
+    new_status = new_status.strip().capitalize()
+
+    if new_status not in ["Confirmed", "Cancelled"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Status must be Confirmed or Cancelled"
+        )
+
+    # Find booking
+    booking = db.query(Bookings).filter(
+        Bookings.id == booking_id
+    ).first()
+
+    if not booking:
+        raise HTTPException(
+            status_code=404,
+            detail="Booking not found"
+        )
+
+    # Prevent duplicate status changes
+    if booking.status == new_status:
+        return {
+            "message": f"Booking is already {new_status}",
+            "booking_id": booking.id,
+            "status": booking.status
+        }
+
+    if booking.status == "Cancelled":
+        raise HTTPException(
+            status_code=400,
+            detail="Cancelled booking cannot be changed"
+        )
+
+    # Restore seats when cancelling a pending booking
+    if new_status == "Cancelled":
+        ride = db.query(Ride).filter(
+            Ride.id == booking.ride_id
+        ).with_for_update().first()
+
+        if not ride:
+            raise HTTPException(
+                status_code=404,
+                detail="Associated ride not found"
+            )
+
+        ride.available_seats += booking.seats_booked
+
+    booking.status = new_status
+
+    try:
+        db.commit()
+        db.refresh(booking)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update booking status"
+        )
+
+    return {
+        "message": f"Booking {new_status.lower()} successfully",
+        "booking_id": booking.id,
+        "status": booking.status
+    }
